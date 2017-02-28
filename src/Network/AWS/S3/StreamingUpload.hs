@@ -133,13 +133,16 @@ streamUpload mcs cmu = do
               leftover returned
               return used
             else return bs
-          case compare (bufsize + (BS.length bytesUsed)) chunkSize of
+          let
+            newBufSize = bufsize + BS.length bytesUsed
+            newBuf = D.snoc bss bytesUsed
+          case compare newBufSize chunkSize of
             GT -> fail "Exceeded specified chunk size"
-            LT -> go (D.snoc bss bytesUsed) (bufsize + (BS.length bytesUsed)) (hashUpdate ctx bytesUsed) partnum completed
+            LT -> go newBuf newBufSize (hashUpdate ctx bytesUsed) partnum completed
             EQ -> do
-              rs <- lift $ partUploader partnum (bufsize + BS.length bytesUsed)
+              rs <- lift $ partUploader partnum newBufSize
                                         (hashFinalize $ hashUpdate ctx bytesUsed)
-                                        (D.snoc bss bytesUsed)
+                                        newBuf
 
               logStr $ printf "\n**** Uploaded part %d size %d\n" partnum (bufsize + (BS.length bytesUsed))
               let part = completedPart partnum <$> (rs ^. uprsETag)
