@@ -48,7 +48,7 @@ import           Control.Monad.Reader.Class             (local)
 import           Control.Monad.Trans.Resource           (MonadBaseControl,
                                                          MonadResource, throwM)
 
-import           Data.Conduit                           (Sink, await)
+import           Data.Conduit                           (Sink, await, leftover)
 import           Data.Conduit.List                      (sourceList)
 
 import           Data.ByteString                        (ByteString)
@@ -113,29 +113,33 @@ streamUpload mcs cmu = do
     fail "Failed to create upload"
 
   logStr "\n**** Created upload\n"
+  logStr $ printf "\n**** Chunk Size: %d\n" chunkSize
 
   let Just upId = cmur ^. cmursUploadId
       bucket    = cmu  ^. cmuBucket
       key       = cmu  ^. cmuKey
       -- go :: Text -> Builder -> Int -> Int -> Sink ByteString m ()
       go !bss !bufsize !ctx !partnum !completed = Data.Conduit.await >>= \mbs -> case mbs of
-        Just bs | l <- BS.length bs
-                , bufsize + l <= chunkSize ->
-                    go (D.snoc bss bs) (bufsize + l) (hashUpdate ctx bs) partnum completed
+        Just bs -> do
+          let
+            bytesNeeded = chunkSize - bufsize
+            (bytesUsed, bytesReturned) = BS.splitAt bytesNeeded bs
+          if not (BS.null bytesReturned) then leftover bytesReturned else return ()
+          case compare (bufsize + (BS.length bytesUsed)) chunkSize of
+            GT -> fail "Exceeded specified chunk size"
+            LT -> go (D.snoc bss bytesUsed) (bufsize + (BS.length bytesUsed)) (hashUpdate ctx bytesUsed) partnum completed
+            EQ -> do
+              rs <- lift $ partUploader partnum (bufsize + BS.length bytesUsed)
+                                        (hashFinalize $ hashUpdate ctx bytesUsed)
+                                        (D.snoc bss bytesUsed)
 
-                | otherwise -> do
-                    rs <- lift $ partUploader partnum (bufsize + BS.length bs)
-                                              (hashFinalize $ hashUpdate ctx bs)
-                                              (D.snoc bss bs)
-
-                    logStr $ printf "\n**** Uploaded part %d size %d\n" partnum bufsize
-                    let part = completedPart partnum <$> (rs ^. uprsETag)
+              logStr $ printf "\n**** Uploaded part %d size %d\n" partnum (bufsize + (BS.length bytesUsed))
+              let part = completedPart partnum <$> (rs ^. uprsETag)
 #if MIN_VERSION_amazonka_s3(1,4,1)
-                        !_ = rnf part
+                  !_ = rnf part
 #endif
-                    liftIO performGC
-                    go empty 0 hashInit (partnum+1) . D.snoc completed $! part
-
+              liftIO performGC
+              go empty 0 hashInit (partnum+1) . D.snoc completed $! part
         Nothing -> lift $ do
             prts <- if bufsize > 0
                 then do
