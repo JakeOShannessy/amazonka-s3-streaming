@@ -121,10 +121,18 @@ streamUpload mcs cmu = do
       -- go :: Text -> Builder -> Int -> Int -> Sink ByteString m ()
       go !bss !bufsize !ctx !partnum !completed = Data.Conduit.await >>= \mbs -> case mbs of
         Just bs -> do
-          let
-            bytesNeeded = chunkSize - bufsize
-            (bytesUsed, bytesReturned) = BS.splitAt bytesNeeded bs
-          if not (BS.null bytesReturned) then leftover bytesReturned else return ()
+          -- the number of bytes needed to complete the chunk
+          let bytesNeeded = chunkSize - bufsize
+          -- if the number of bytes needed to complete the chunk is less than
+          -- that provided in this bytestring, split the bytes string, returning
+          -- the unneeded bytes upstream using leftover (to be used in the next
+          -- chunk)
+          bytesUsed <- if bytesNeeded < (BS.length bs)
+            then do
+              let (used,returned) = BS.splitAt bytesNeeded bs
+              leftover returned
+              return used
+            else return bs
           case compare (bufsize + (BS.length bytesUsed)) chunkSize of
             GT -> fail "Exceeded specified chunk size"
             LT -> go (D.snoc bss bytesUsed) (bufsize + (BS.length bytesUsed)) (hashUpdate ctx bytesUsed) partnum completed
